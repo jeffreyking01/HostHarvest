@@ -1,0 +1,102 @@
+# =============================================================================
+# VulnOps CMDB Agent — Configuration
+# =============================================================================
+#
+# Secrets can be provided here OR via environment variables.
+# Environment variables always take precedence over values in this file.
+#
+# Env var mapping:
+#   ANTHROPIC_API_KEY   → anthropic.api_key
+#   SNIPEIT_TOKEN       → snipeit.api_token
+#   GLPI_APP_TOKEN      → glpi.app_token
+#   GLPI_USER_TOKEN     → glpi.user_token
+#
+# For Ansible deployments, inject secrets as env vars in the systemd unit
+# or cron environment rather than writing them to this file.
+# =============================================================================
+
+
+# ── Anthropic / Claude ────────────────────────────────────────────────────────
+anthropic:
+  # API key — leave blank to use ANTHROPIC_API_KEY env var
+  api_key: ""
+
+  # Model to use for enrichment.  claude-sonnet-4-20250514 is the best
+  # balance of accuracy and cost for this workload.
+  model: "claude-sonnet-4-20250514"
+
+  # Number of packages sent to Claude per API call.
+  # Larger batches = fewer calls but larger prompts.
+  # 40 is a safe default; reduce to 20 if you hit token limit errors.
+  batch_size: 40
+
+
+# ── Snipe-IT ──────────────────────────────────────────────────────────────────
+snipeit:
+  enabled: true
+  base_url: "https://snipeit.your-agency.gov"
+
+  # API token — leave blank to use SNIPEIT_TOKEN env var
+  api_token: ""
+
+  # Default category ID assigned to new asset models.
+  # Find this in Snipe-IT under Settings > Asset Categories.
+  default_category_id: 1
+
+  # Default status label ID for new assets (e.g., "Ready to Deploy").
+  # Find this in Snipe-IT under Settings > Status Labels.
+  default_status_id: 1
+
+
+# ── GLPI ──────────────────────────────────────────────────────────────────────
+glpi:
+  enabled: true
+  base_url: "https://glpi.your-agency.gov"
+
+  # App token (generated in GLPI under Setup > General > API).
+  # Leave blank to use GLPI_APP_TOKEN env var.
+  app_token: ""
+
+  # User token (generated per user in GLPI under My Settings > Remote access keys).
+  # This should be a dedicated service account.
+  # Leave blank to use GLPI_USER_TOKEN env var.
+  user_token: ""
+
+
+# ── Scanning ─────────────────────────────────────────────────────────────────
+scan:
+  # Toggle each scanner independently
+  scan_python: true
+  scan_npm: true
+  scan_java: true
+
+  # Root directories to search for npm package.json files.
+  # Defaults are used if these lists are empty or omitted.
+  # Tip: narrow these to reduce scan time on large filesystems.
+  npm_search_roots:
+    - /opt
+    - /srv
+    - /var/www
+    - /app
+
+  # Root directories to search for Java JAR/WAR/EAR files.
+  java_search_roots:
+    - /opt
+    - /srv
+    - /var
+    - /app
+    - /usr/share/java
+
+
+# ── Output / audit ────────────────────────────────────────────────────────────
+output:
+  # Save the raw (pre-enrichment) host snapshot to a JSON file.
+  # Useful for debugging and as an audit trail.
+  save_raw_snapshot: false
+  raw_snapshot_path: "/var/log/cmdb-agent/snapshot.json"
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"             # DEBUG | INFO | WARNING | ERROR
+  log_file: "/var/log/cmdb-agent/agent.log"

@@ -1,0 +1,9 @@
+# VulnOps CMDB Agent — Python dependencies
+#
+# Install with: pip3 install -r requirements.txt
+
+# Core
+anthropic>=0.40.0          # Claude API client (MCP enrichment)
+requests>=2.31.0           # HTTP client for Snipe-IT and GLPI APIs
+pyyaml>=6.0.1              # Config file parsing
+psutil>=5.9.0              # Cross-platform hardware/network info

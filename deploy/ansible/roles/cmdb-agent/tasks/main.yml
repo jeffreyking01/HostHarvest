@@ -1,0 +1,158 @@
+---
+# roles/cmdb-agent/tasks/main.yml
+#
+# Deploys the VulnOps CMDB agent to a target host and installs
+# an OS-appropriate periodic trigger (cron or Windows Scheduled Task).
+#
+# Required variables (set in group_vars, host_vars, or vault):
+#   cmdb_agent_anthropic_api_key
+#   cmdb_agent_snipeit_token
+#   cmdb_agent_glpi_app_token
+#   cmdb_agent_glpi_user_token
+#   cmdb_agent_snipeit_url
+#   cmdb_agent_glpi_url
+#
+# Optional:
+#   cmdb_agent_install_dir   (default: /opt/cmdb-agent)
+#   cmdb_agent_run_interval  (default: "0 */6 * * *"  = every 6 hours)
+#   cmdb_agent_python_bin    (default: /usr/bin/python3)
+
+- name: Set platform-specific defaults
+  set_fact:
+    cmdb_agent_install_dir: "{{ cmdb_agent_install_dir | default('/opt/cmdb-agent') }}"
+    cmdb_agent_run_interval: "{{ cmdb_agent_run_interval | default('0 */6 * * *') }}"
+    cmdb_agent_python_bin: "{{ cmdb_agent_python_bin | default('/usr/bin/python3') }}"
+    cmdb_agent_log_dir: "/var/log/cmdb-agent"
+
+# ── Linux / macOS ──────────────────────────────────────────────────────────
+
+- name: Create install directory
+  file:
+    path: "{{ cmdb_agent_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: ansible_system != "Win32NT"
+
+- name: Create log directory
+  file:
+    path: "{{ cmdb_agent_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0750"
+  when: ansible_system != "Win32NT"
+
+- name: Sync agent source files
+  synchronize:
+    src: "{{ playbook_dir }}/../../"     # repo root
+    dest: "{{ cmdb_agent_install_dir }}/"
+    rsync_opts:
+      - "--exclude=.git"
+      - "--exclude=__pycache__"
+      - "--exclude=*.pyc"
+      - "--exclude=deploy/"
+      - "--exclude=tests/"
+  when: ansible_system != "Win32NT"
+
+- name: Install Python dependencies
+  pip:
+    requirements: "{{ cmdb_agent_install_dir }}/requirements.txt"
+    executable: pip3
+  when: ansible_system != "Win32NT"
+
+- name: Deploy config.yaml from template
+  template:
+    src: config.yaml.j2
+    dest: "{{ cmdb_agent_install_dir }}/config.yaml"
+    owner: root
+    group: root
+    mode: "0640"
+  when: ansible_system != "Win32NT"
+
+- name: Install cron job (Linux/macOS)
+  cron:
+    name: "VulnOps CMDB Agent"
+    minute: "{{ cmdb_agent_run_interval.split()[0] }}"
+    hour: "{{ cmdb_agent_run_interval.split()[1] }}"
+    day: "{{ cmdb_agent_run_interval.split()[2] }}"
+    month: "{{ cmdb_agent_run_interval.split()[3] }}"
+    weekday: "{{ cmdb_agent_run_interval.split()[4] }}"
+    job: >
+      {{ cmdb_agent_python_bin }}
+      {{ cmdb_agent_install_dir }}/agent/agent.py
+      --config {{ cmdb_agent_install_dir }}/config.yaml
+      >> {{ cmdb_agent_log_dir }}/cron.log 2>&1
+    user: root
+  when: ansible_system != "Win32NT"
+
+- name: Run agent immediately after provisioning (first-run)
+  command: >
+    {{ cmdb_agent_python_bin }}
+    {{ cmdb_agent_install_dir }}/agent/agent.py
+    --config {{ cmdb_agent_install_dir }}/config.yaml
+  environment:
+    ANTHROPIC_API_KEY: "{{ cmdb_agent_anthropic_api_key }}"
+    SNIPEIT_TOKEN: "{{ cmdb_agent_snipeit_token }}"
+    GLPI_APP_TOKEN: "{{ cmdb_agent_glpi_app_token }}"
+    GLPI_USER_TOKEN: "{{ cmdb_agent_glpi_user_token }}"
+  when: ansible_system != "Win32NT"
+  ignore_errors: true    # don't fail playbook if CMDB is unreachable at provision time
+
+# ── Windows ────────────────────────────────────────────────────────────────
+
+- name: Create install directory (Windows)
+  win_file:
+    path: 'C:\cmdb-agent'
+    state: directory
+  when: ansible_system == "Win32NT"
+
+- name: Sync agent source files (Windows)
+  win_copy:
+    src: "{{ playbook_dir }}/../../"
+    dest: 'C:\cmdb-agent\'
+  when: ansible_system == "Win32NT"
+
+- name: Install Python dependencies (Windows)
+  win_command: >
+    python -m pip install -r C:\cmdb-agent\requirements.txt
+  when: ansible_system == "Win32NT"
+
+- name: Deploy config.yaml from template (Windows)
+  win_template:
+    src: config.yaml.j2
+    dest: 'C:\cmdb-agent\config.yaml'
+  when: ansible_system == "Win32NT"
+
+- name: Create Windows Scheduled Task
+  win_scheduled_task:
+    name: VulnOps CMDB Agent
+    description: Periodic CMDB asset and software inventory collection
+    actions:
+      - path: python
+        arguments: 'C:\cmdb-agent\agent\agent.py --config C:\cmdb-agent\config.yaml'
+    triggers:
+      - type: daily
+        start_boundary: "2024-01-01T02:00:00"
+        repetition:
+          interval: PT6H    # every 6 hours
+          duration: P1D
+    run_level: highest
+    logon_type: service_account
+    username: SYSTEM
+    enabled: true
+    state: present
+  when: ansible_system == "Win32NT"
+
+- name: Run agent immediately (Windows first-run)
+  win_command: >
+    python C:\cmdb-agent\agent\agent.py
+    --config C:\cmdb-agent\config.yaml
+  environment:
+    ANTHROPIC_API_KEY: "{{ cmdb_agent_anthropic_api_key }}"
+    SNIPEIT_TOKEN: "{{ cmdb_agent_snipeit_token }}"
+    GLPI_APP_TOKEN: "{{ cmdb_agent_glpi_app_token }}"
+    GLPI_USER_TOKEN: "{{ cmdb_agent_glpi_user_token }}"
+  when: ansible_system == "Win32NT"
+  ignore_errors: true

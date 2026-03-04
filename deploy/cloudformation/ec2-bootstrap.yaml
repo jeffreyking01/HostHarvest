@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  VulnOps CMDB Agent — EC2 bootstrap snippet.
+  Attach this UserData block to any EC2 instance resource to auto-enroll
+  new instances into Snipe-IT and GLPI at first boot.
+
+  Secrets are pulled from AWS Secrets Manager — no plaintext credentials
+  in UserData or the template itself.
+
+  Required Secrets Manager secrets (create these before deploying):
+    /vulnops/anthropic_api_key
+    /vulnops/snipeit_token
+    /vulnops/glpi_app_token
+    /vulnops/glpi_user_token
+
+Parameters:
+  GitLabRepoURL:
+    Type: String
+    Description: HTTPS URL of your self-hosted cmdb-agent repo (no credentials in URL)
+    Default: "https://gitlab.your-agency.gov/security/cmdb-agent.git"
+
+  GitLabToken:
+    Type: String
+    NoEcho: true
+    Description: >
+      GitLab deploy token (read-only, repo scope).
+      Store in Secrets Manager and pass in via dynamic reference:
+      {{resolve:secretsmanager:/vulnops/gitlab_deploy_token}}
+
+  SnipeITURL:
+    Type: String
+    Default: "https://snipeit.your-agency.gov"
+
+  GLPIURL:
+    Type: String
+    Default: "https://glpi.your-agency.gov"
+
+Resources:
+
+  # IAM role allowing the instance to read Secrets Manager
+  CMDBAgentInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CMDBAgentInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CMDBAgentSecretsAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/vulnops/*"
+
+  CMDBAgentInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref CMDBAgentInstanceRole
+
+  # Example EC2 instance — replace with your own resource or use this
+  # UserData block in an existing Launch Template
+  ExampleEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0abcdef1234567890    # replace with your golden AMI
+      InstanceType: t3.medium
+      IamInstanceProfile: !Ref CMDBAgentInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euo pipefail
+          exec > /var/log/cmdb-agent-bootstrap.log 2>&1
+
+          echo "=== VulnOps CMDB Agent Bootstrap ==="
+          echo "Instance ID: $(curl -s http://169.254.169.254/latest/meta-data/instance-id)"
+          echo "Region: ${AWS::Region}"
+
+          # ── Fetch secrets from AWS Secrets Manager ──────────────────────────
+          REGION="${AWS::Region}"
+
+          get_secret() {
+            aws secretsmanager get-secret-value \
+              --region "$REGION" \
+              --secret-id "$1" \
+              --query SecretString \
+              --output text
+          }
+
+          export ANTHROPIC_API_KEY=$(get_secret /vulnops/anthropic_api_key)
+          export SNIPEIT_TOKEN=$(get_secret /vulnops/snipeit_token)
+          export GLPI_APP_TOKEN=$(get_secret /vulnops/glpi_app_token)
+          export GLPI_USER_TOKEN=$(get_secret /vulnops/glpi_user_token)
+          GITLAB_TOKEN=$(get_secret /vulnops/gitlab_deploy_token)
+
+          # ── Install system dependencies ─────────────────────────────────────
+          if command -v apt-get &>/dev/null; then
+            apt-get update -q
+            apt-get install -yq python3 python3-pip git dmidecode
+          elif command -v yum &>/dev/null; then
+            yum install -yq python3 python3-pip git dmidecode
+          fi
+
+          # ── Clone agent from self-hosted GitLab ─────────────────────────────
+          INSTALL_DIR="/opt/cmdb-agent"
+          REPO_URL=$(echo "${GitLabRepoURL}" | sed "s|https://|https://deploy:${!GITLAB_TOKEN}@|")
+          git clone "$REPO_URL" "$INSTALL_DIR"
+
+          # ── Install Python requirements ──────────────────────────────────────
+          pip3 install -r "$INSTALL_DIR/requirements.txt" --quiet
+
+          # ── Write config (secrets from env vars, not written to disk) ────────
+          mkdir -p /var/log/cmdb-agent
+          cat > "$INSTALL_DIR/config.yaml" <<YAML
+          anthropic:
+            api_key: ""
+            model: "claude-sonnet-4-20250514"
+            batch_size: 40
+          snipeit:
+            enabled: true
+            base_url: "${SnipeITURL}"
+            api_token: ""
+          glpi:
+            enabled: true
+            base_url: "${GLPIURL}"
+            app_token: ""
+            user_token: ""
+          scan:
+            scan_python: true
+            scan_npm: true
+            scan_java: true
+          output:
+            save_raw_snapshot: true
+            raw_snapshot_path: "/var/log/cmdb-agent/snapshot.json"
+          logging:
+            level: "INFO"
+            log_file: "/var/log/cmdb-agent/agent.log"
+          YAML
+
+          # ── Run agent (secrets in environment, not config file) ───────────────
+          python3 "$INSTALL_DIR/agent/agent.py" \
+            --config "$INSTALL_DIR/config.yaml"
+
+          # ── Install cron for periodic check-in ───────────────────────────────
+          # Secrets will be injected via /etc/environment on subsequent runs
+          cat >> /etc/environment <<ENV
+          ANTHROPIC_API_KEY=${!ANTHROPIC_API_KEY}
+          SNIPEIT_TOKEN=${!SNIPEIT_TOKEN}
+          GLPI_APP_TOKEN=${!GLPI_APP_TOKEN}
+          GLPI_USER_TOKEN=${!GLPI_USER_TOKEN}
+          ENV
+          chmod 600 /etc/environment
+
+          echo "0 */6 * * * root /usr/bin/python3 $INSTALL_DIR/agent/agent.py --config $INSTALL_DIR/config.yaml >> /var/log/cmdb-agent/cron.log 2>&1" \
+            > /etc/cron.d/cmdb-agent
+
+          echo "=== Bootstrap complete ==="
+
+Outputs:
+  InstanceRoleArn:
+    Description: IAM Role ARN for the CMDB agent instance
+    Value: !GetAtt CMDBAgentInstanceRole.Arn
