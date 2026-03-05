@@ -33,7 +33,7 @@ anthropic:
 
 # ── Snipe-IT ──────────────────────────────────────────────────────────────────
 snipeit:
-  enabled: true
+  enabled: false
   base_url: "https://snipeit.your-agency.gov"
 
   # API token — leave blank to use SNIPEIT_TOKEN env var
@@ -50,7 +50,7 @@ snipeit:
 
 # ── GLPI ──────────────────────────────────────────────────────────────────────
 glpi:
-  enabled: true
+  enabled: false
   base_url: "https://glpi.your-agency.gov"
 
   # App token (generated in GLPI under Setup > General > API).
