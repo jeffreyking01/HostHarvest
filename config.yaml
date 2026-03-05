@@ -100,3 +100,8 @@ output:
 logging:
   level: "INFO"             # DEBUG | INFO | WARNING | ERROR
   log_file: "/var/log/cmdb-agent/agent.log"
+
+ironfist:
+  enabled: true
+  base_url: "http://localhost:8000"
+  token: "dev-agent-token"

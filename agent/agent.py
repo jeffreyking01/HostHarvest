@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.collector import collect_snapshot, snapshot_to_dict
 from enrichment.enrichment import enrich_packages, summarize_risk
 from cmdb.cmdb_clients import SnipeITClient, GLPIClient
+from cmdb.ironfist_client import IronFistClient
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -74,6 +75,10 @@ def load_config(path: str = None) -> dict:
         cfg["glpi"]["user_token"] = (
             os.environ.get("GLPI_USER_TOKEN") or cfg["glpi"].get("user_token", "")
         )
+    if "ironfist" in cfg:
+        cfg["ironfist"]["token"] = (
+            os.environ.get("IRONFIST_TOKEN") or cfg["ironfist"].get("token", "")
+        )
     return cfg
 
 
@@ -96,7 +101,6 @@ def run(config: dict, dry_run: bool = False, skip_enrich: bool = False):
         len(snapshot.installed_packages),
     )
 
-    # Optionally write raw snapshot to disk (useful for debugging / audit trail)
     if config.get("output", {}).get("save_raw_snapshot"):
         raw_path = config["output"].get("raw_snapshot_path", "/tmp/cmdb_snapshot.json")
         with open(raw_path, "w") as fh:
@@ -107,7 +111,7 @@ def run(config: dict, dry_run: bool = False, skip_enrich: bool = False):
     enriched_packages = snapshot_dict["installed_packages"]
 
     if not skip_enrich:
-        log.info("=== Step 2: Enriching via Claude MCP ===")
+        log.info("=== Step 2: Enriching via Claude ===")
         anthropic_cfg = config.get("anthropic", {})
         api_key = anthropic_cfg.get("api_key", "")
         if not api_key:
@@ -136,10 +140,29 @@ def run(config: dict, dry_run: bool = False, skip_enrich: bool = False):
         print(json.dumps(risk_summary, indent=2))
         return
 
-    # ── Step 3: Push to Snipe-IT ──────────────────────────────────────────────
+    # ── Step 3a: Push to IronFist ─────────────────────────────────────────────
+    ironfist_cfg = config.get("ironfist", {})
+    if ironfist_cfg.get("enabled", False):
+        log.info("=== Step 3a: Pushing asset to IronFist ===")
+        try:
+            ironfist = IronFistClient(
+                base_url=ironfist_cfg["base_url"],
+                token=ironfist_cfg.get("token"),
+            )
+            result = ironfist.ingest(snapshot_dict, enriched_packages)
+            log.info(
+                "IronFist ingest complete: asset_id=%s action=%s",
+                result.get("asset_id"), result.get("action"),
+            )
+        except Exception as exc:
+            log.error("IronFist push failed: %s", exc)
+    else:
+        log.info("IronFist push disabled in config (set ironfist.enabled: true)")
+
+    # ── Step 3b: Push to Snipe-IT ─────────────────────────────────────────────
     snipeit_cfg = config.get("snipeit", {})
     if snipeit_cfg.get("enabled", True):
-        log.info("=== Step 3a: Pushing hardware to Snipe-IT ===")
+        log.info("=== Step 3b: Pushing hardware to Snipe-IT ===")
         try:
             snipeit = SnipeITClient(
                 base_url=snipeit_cfg["base_url"],
@@ -152,10 +175,10 @@ def run(config: dict, dry_run: bool = False, skip_enrich: bool = False):
     else:
         log.info("Snipe-IT push disabled in config")
 
-    # ── Step 4: Push to GLPI ──────────────────────────────────────────────────
+    # ── Step 3c: Push to GLPI ─────────────────────────────────────────────────
     glpi_cfg = config.get("glpi", {})
     if glpi_cfg.get("enabled", True):
-        log.info("=== Step 3b: Pushing software inventory to GLPI ===")
+        log.info("=== Step 3c: Pushing software inventory to GLPI ===")
         try:
             with GLPIClient(
                 base_url=glpi_cfg["base_url"],
@@ -179,31 +202,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="VulnOps CMDB Asset Discovery Agent"
     )
-    parser.add_argument(
-        "--config", "-c",
-        default=None,
-        help="Path to config.yaml (default: ../config.yaml relative to agent.py)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Collect and enrich but do not write to Snipe-IT or GLPI",
-    )
-    parser.add_argument(
-        "--no-enrich",
-        action="store_true",
-        help="Skip Claude enrichment step",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-    )
-    parser.add_argument(
-        "--log-file",
-        default=None,
-        help="Optional path to write logs to file",
-    )
+    parser.add_argument("--config", "-c", default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-enrich", action="store_true")
+    parser.add_argument("--log-level", default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--log-file", default=None)
     args = parser.parse_args()
 
     setup_logging(args.log_level, args.log_file)
